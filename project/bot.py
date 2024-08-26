@@ -1,6 +1,9 @@
 import psycopg2
 import telebot
 from telebot import types
+import re
+from datetime import datetime, timedelta
+
 import config
 
 # Конфигурация
@@ -8,6 +11,7 @@ API_TOKEN = config.TOKEN
 DATABASE_URL = config.DB_URL
 SUPPORT_CHAT_ID = config.ADMIN_CHAT
 SENIOR_CURATOR_CHAT_ID = config.SENIOR_CHAT
+REQUEST_INTERVAL = timedelta(minutes=10)  # Интервал между обращениями
 
 bot = telebot.TeleBot(API_TOKEN)
 
@@ -69,6 +73,14 @@ def process_group(message):
     group_name = message.text
     user_id = message.from_user.id
 
+    # Регулярное выражение для проверки формата группы
+    pattern = r'^[бсмБСМаА]\d{2}-\d{3}$'
+
+    if not re.match(pattern, group_name):
+        msg = bot.send_message(message.chat.id, "Некорректный формат группы. Пожалуйста, введите группу в формате: БXX-XXX (СXX-XXX)")
+        bot.register_next_step_handler(msg, process_group)
+        return
+
     cursor.execute("SELECT full_name, role FROM users WHERE user_id = %s", (user_id,))
     user_data = cursor.fetchone()
 
@@ -85,7 +97,7 @@ def process_group(message):
     bot.send_message(message.chat.id, f"Регистрация завершена!\nФИО: {user_data[0]}\nРоль: {user_data[1]}")
     
     show_options(message, user_data[1])
-
+    
 # Функция для отображения опций
 def show_options(message, role):
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
@@ -96,9 +108,30 @@ def show_options(message, role):
 
     bot.send_message(message.chat.id, "Выберите одну из опций:", reply_markup=markup)
 
+# Проверка интервала времени с последнего обращения
+def can_send_request(last_request_time):
+    if last_request_time is None:
+        return True
+    return datetime.now() - last_request_time >= REQUEST_INTERVAL
+
 # Обработка обращений в тех.поддержку
 @bot.message_handler(func=lambda message: message.text == "Тех. поддержка")
 def tech_support(message):
+    user_id = message.from_user.id
+
+    cursor.execute("SELECT last_support_request FROM users WHERE user_id = %s", (user_id,))
+    last_support_request = cursor.fetchone()[0]
+
+
+    if not can_send_request(last_support_request):
+        diff = 10 - int(datetime.now().minute - last_support_request.minute)
+        minute_str = '' 
+        if(diff == 1): minute_str = 'минута' 
+        elif(diff in (2, 5)): minute_str = 'минуты'
+        else: minute_str = 'минут'
+        bot.send_message(message.chat.id, f"Вы недавно обращались в тех.поддержку. Пожалуйста, подождите {diff} {minute_str} перед следующим обращением.")
+        return show_options(message, "Куратор" if message.text == "Куратор" else "Первокурсник")
+
     msg = bot.send_message(message.chat.id, "Пожалуйста, напишите ваше сообщение в тех.поддержку.")
     bot.register_next_step_handler(msg, process_support_message)
 
@@ -111,6 +144,10 @@ def process_support_message(message):
     # Отправляем сообщение в тех.поддержку
     bot.send_message(SUPPORT_CHAT_ID, f"Сообщение от пользователя @{name}:\n{support_message}")
 
+    # Обновляем время последнего обращения в тех.поддержку
+    cursor.execute("UPDATE users SET last_support_request = %s WHERE user_id = %s", (datetime.now(), user_id))
+    conn.commit()
+
     # Отправляем подтверждение пользователю
     bot.send_message(message.chat.id, "Ваше сообщение отправлено в тех.поддержку. Спасибо!")
 
@@ -120,39 +157,24 @@ def process_support_message(message):
     if role:
         show_options(message, role[0])
 
-# Обработка отчетов кураторов
-@bot.message_handler(func=lambda message: message.text == "Отчитаться")
-def curator_report(message):
-    user_id = message.from_user.id
-
-    cursor.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
-    role = cursor.fetchone()
-
-    if role is None or role[0] != "Куратор":
-        bot.send_message(message.chat.id, "Эта опция доступна только для кураторов.")
-        show_options(message, role[0] if role else 'Неизвестно')
-        return
-
-    bot.send_message(message.chat.id, "Введите ваш отчет...")  # Здесь будет логика обработки отчетов
-
-# Обработка отзывов первокурсников
-@bot.message_handler(func=lambda message: message.text == "Расскажу о кураторе")
-def freshman_feedback(message):
-    user_id = message.from_user.id
-
-    cursor.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
-    role = cursor.fetchone()
-
-    if role is None or role[0] != "Первокурсник":
-        bot.send_message(message.chat.id, "Эта опция доступна только для первокурсников.")
-        show_options(message, role[0] if role else 'Неизвестно')
-        return
-
-    bot.send_message(message.chat.id, "Введите ваш отзыв о кураторе...")  # Логика обработки отзывов
-
 # Обработка обращения к старшему куратору
 @bot.message_handler(func=lambda message: message.text == "Старший куратор")
 def senior_curator(message):
+    user_id = message.from_user.id
+
+    cursor.execute("SELECT last_curator_request FROM users WHERE user_id = %s", (user_id,))
+    last_curator_request = cursor.fetchone()[0]
+    
+
+    if not can_send_request(last_curator_request):
+        diff = 10 - int(datetime.now().minute - last_curator_request.minute)
+        minute_str = '' 
+        if(diff == 1): minute_str = 'минута' 
+        elif(diff in (2, 5)): minute_str = 'минуты'
+        else: minute_str = 'минут'
+        bot.send_message(message.chat.id, f"""Вы недавно обращались к старшему куратору. Пожалуйста, подождите {diff} {minute_str} перед следующим обращением.""")
+        return show_options(message, "Куратор" if message.text == "Куратор" else "Первокурсник")
+
     msg = bot.send_message(message.chat.id, "Пожалуйста, напишите ваше сообщение для старшего куратора.")
     bot.register_next_step_handler(msg, process_senior_curator_message)
 
@@ -165,6 +187,10 @@ def process_senior_curator_message(message):
     # Отправляем сообщение старшему куратору
     bot.send_message(SENIOR_CURATOR_CHAT_ID, f"Сообщение от пользователя @{name}:\n{senior_message}")
 
+    # Обновляем время последнего обращения к старшему куратору
+    cursor.execute("UPDATE users SET last_curator_request = %s WHERE user_id = %s", (datetime.now(), user_id))
+    conn.commit()
+
     # Отправляем подтверждение пользователю
     bot.send_message(message.chat.id, "Ваше сообщение отправлено старшему куратору. Спасибо!")
 
@@ -175,4 +201,4 @@ def process_senior_curator_message(message):
         show_options(message, role[0])
 
 # Запуск бота
-bot.polling()
+bot.polling(none_stop=True)
