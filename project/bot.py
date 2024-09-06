@@ -29,10 +29,64 @@ def start_command(message):
 
     if user:
         bot.send_message(message.chat.id, f"Ваши данные:\nФИО: {user[0]}\nРоль: {user[1]}")
-        show_options(message, user[1])
+        if user[1] == "Модератор":
+            show_moderator_options(message)
+        else:
+            show_options(message, user[1])
     else:
         msg = bot.send_message(message.chat.id, "Добро пожаловать! Пожалуйста, укажите ваше полное имя.")
         bot.register_next_step_handler(msg, process_full_name)
+
+# Функция для отображения опций модератора
+def show_moderator_options(message):
+    markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    markup.add('Просмотр сообщений', 'Тех. поддержка', 'Старший куратор')
+    bot.send_message(message.chat.id, "Выберите одну из опций, Модератор:", reply_markup=markup)
+    
+    
+# Команда для просмотра всех сообщений, на которые можно ответить
+@bot.message_handler(func=lambda message: message.text == "Просмотр сообщений")
+def view_messages(message):
+    cursor.execute("SELECT message_id, user_id, message_text FROM messages WHERE moderator_id IS NULL ORDER BY timestamp DESC")
+    messages = cursor.fetchall()
+
+    if messages:
+        response = "Сообщения, на которые можно ответить:\n\n"
+        for msg in messages:
+            response += f"ID: {msg[0]}\nОт пользователя: {msg[1]}\nСообщение: {msg[2]}\n\n"
+    else:
+        response = "Нет сообщений, на которые можно ответить."
+
+    bot.send_message(message.chat.id, response)
+
+# Команда для ответа на сообщение
+@bot.message_handler(commands=['reply'])
+def reply_to_user(message):
+    try:
+        args = message.text.split(' ', 2)  # /reply <message_id> <response_text>
+        message_id = int(args[1])
+        response_text = args[2]
+
+        # Получаем информацию о пользователе по ID сообщения
+        cursor.execute("SELECT user_id FROM messages WHERE message_id = %s", (message_id,))
+        user_id = cursor.fetchone()
+
+        if user_id:
+            user_id = user_id[0]
+            bot.send_message(user_id, f"Ответ от модератора:\n{response_text}")
+
+            # Обновляем информацию о модераторе, который ответил
+            cursor.execute(
+                "UPDATE messages SET moderator_id = %s WHERE message_id = %s",
+                (message.from_user.id, message_id)
+            )
+            conn.commit()
+
+            bot.send_message(message.chat.id, "Ваш ответ был отправлен пользователю.")
+        else:
+            bot.send_message(message.chat.id, "Сообщение с таким ID не найдено.")
+    except (IndexError, ValueError):
+        bot.send_message(message.chat.id, "Неверный формат команды. Используйте /reply <ID сообщения> <текст ответа>.")
 
 # Получаем ФИО пользователя
 def process_full_name(message):
